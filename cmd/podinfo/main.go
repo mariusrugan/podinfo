@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/contrib/bridges/otelzap"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -93,8 +99,17 @@ func main() {
 		}
 	}
 
-	// configure logging
-	logger, _ := initZap(viper.GetString("level"))
+	// configure logging with optional OTEL export
+	otelServiceName := viper.GetString("otel-service-name")
+	var loggerProvider *sdklog.LoggerProvider
+	if otelServiceName != "" {
+		var err error
+		loggerProvider, err = initLoggerProvider(otelServiceName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize OTEL logger provider: %v\n", err)
+		}
+	}
+	logger, _ := initZap(viper.GetString("level"), loggerProvider)
 	defer logger.Sync()
 	stdLog := zap.RedirectStdLog(logger)
 	defer stdLog()
@@ -163,10 +178,39 @@ func main() {
 	// graceful shutdown
 	stopCh := signals.SetupSignalHandler()
 	sd, _ := signals.NewShutdown(srvCfg.ServerShutdownTimeout, logger)
+	sd.SetLoggerProvider(loggerProvider)
 	sd.Graceful(stopCh, httpServer, httpsServer, grpcServer, healthy, ready)
 }
 
-func initZap(logLevel string) (*zap.Logger, error) {
+// initLoggerProvider creates an OTLP log exporter for OpenTelemetry.
+// It uses the same resource attributes as the tracer for correlation.
+func initLoggerProvider(serviceName string) (*sdklog.LoggerProvider, error) {
+	ctx := context.Background()
+
+	// Create OTLP log exporter using gRPC (same transport as traces)
+	exporter, err := otlploggrpc.New(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
+	}
+
+	// Create resource with service information (matches tracer.go pattern)
+	// Using NewWithAttributes directly to avoid schema version conflicts
+	res := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName(serviceName),
+		semconv.ServiceVersion(version.VERSION),
+	)
+
+	// Create logger provider with batch processor for efficient export
+	loggerProvider := sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+	)
+
+	return loggerProvider, nil
+}
+
+func initZap(logLevel string, loggerProvider *sdklog.LoggerProvider) (*zap.Logger, error) {
 	level := zap.NewAtomicLevelAt(zapcore.InfoLevel)
 	switch logLevel {
 	case "debug":
@@ -197,20 +241,32 @@ func initZap(logLevel string) (*zap.Logger, error) {
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}
 
-	zapConfig := zap.Config{
-		Level:       level,
-		Development: false,
-		Sampling: &zap.SamplingConfig{
-			Initial:    100,
-			Thereafter: 100,
-		},
-		Encoding:         "json",
-		EncoderConfig:    zapEncoderConfig,
-		OutputPaths:      []string{"stderr"},
-		ErrorOutputPaths: []string{"stderr"},
+	// Create stderr core (always present)
+	stderrCore := zapcore.NewCore(
+		zapcore.NewJSONEncoder(zapEncoderConfig),
+		zapcore.AddSync(os.Stderr),
+		level,
+	)
+
+	// If OTEL logger provider is available, create dual-output core
+	if loggerProvider != nil {
+		// Create OTEL core using the otelzap bridge
+		otelCore := otelzap.NewCore("podinfo", otelzap.WithLoggerProvider(loggerProvider))
+
+		// Combine stderr and OTEL cores
+		combinedCore := zapcore.NewTee(stderrCore, otelCore)
+
+		return zap.New(combinedCore,
+			zap.AddCaller(),
+			zap.AddStacktrace(zapcore.ErrorLevel),
+		), nil
 	}
 
-	return zapConfig.Build()
+	// OTEL not enabled, use stderr only
+	return zap.New(stderrCore,
+		zap.AddCaller(),
+		zap.AddStacktrace(zapcore.ErrorLevel),
+	), nil
 }
 
 var stressMemoryPayload []byte

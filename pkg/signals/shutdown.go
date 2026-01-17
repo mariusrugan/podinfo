@@ -8,6 +8,7 @@ import (
 
 	"github.com/gomodule/redigo/redis"
 	"github.com/spf13/viper"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -17,6 +18,7 @@ type Shutdown struct {
 	logger                *zap.Logger
 	pool                  *redis.Pool
 	tracerProvider        *sdktrace.TracerProvider
+	loggerProvider        *sdklog.LoggerProvider
 	serverShutdownTimeout time.Duration
 }
 
@@ -27,6 +29,11 @@ func NewShutdown(serverShutdownTimeout time.Duration, logger *zap.Logger) (*Shut
 	}
 
 	return srv, nil
+}
+
+// SetLoggerProvider sets the OTEL logger provider for graceful shutdown.
+func (s *Shutdown) SetLoggerProvider(lp *sdklog.LoggerProvider) {
+	s.loggerProvider = lp
 }
 
 func (s *Shutdown) Graceful(stopCh <-chan struct{}, httpServer *http.Server, httpsServer *http.Server, grpcServer *grpc.Server, healthy *int32, ready *int32) {
@@ -59,6 +66,13 @@ func (s *Shutdown) Graceful(stopCh <-chan struct{}, httpServer *http.Server, htt
 	if s.tracerProvider != nil {
 		if err := s.tracerProvider.Shutdown(ctx); err != nil {
 			s.logger.Warn("stopping tracer provider", zap.Error(err))
+		}
+	}
+
+	// stop OpenTelemetry logger provider (flush remaining logs)
+	if s.loggerProvider != nil {
+		if err := s.loggerProvider.Shutdown(ctx); err != nil {
+			s.logger.Warn("stopping logger provider", zap.Error(err))
 		}
 	}
 
