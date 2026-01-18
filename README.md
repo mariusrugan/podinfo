@@ -15,8 +15,8 @@ Specifications:
 * Health checks (readiness and liveness)
 * Graceful shutdown on interrupt signals
 * File watcher for secrets and configmaps
-* Instrumented with Prometheus and Open Telemetry
-* Structured logging with zap 
+* Instrumented with Prometheus and OpenTelemetry (traces and logs)
+* Structured logging with zap (with optional OTLP export)
 * 12-factor app with viper
 * Fault injection (random errors and latency)
 * Swagger docs

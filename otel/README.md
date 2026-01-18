@@ -1,7 +1,23 @@
-# Tracing Demo
+# OpenTelemetry Demo
 
 The directory contains sample [OpenTelemetry Collector](https://github.com/open-telemetry/opentelemetry-collector)
 and [Jaeger](https://www.jaegertracing.io) configurations for a tracing demo.
+
+## Features
+
+Podinfo supports OpenTelemetry for both **traces** and **logs**:
+
+| Signal | Export Method | Enabled When |
+|--------|---------------|--------------|
+| Traces | OTLP gRPC | `--otel-service-name` is set |
+| Logs | OTLP gRPC | `--otel-service-name` is set |
+
+When `--otel-service-name` is set, logs are exported to the OTLP endpoint while also being written to stderr. The otelzap bridge automatically includes trace context (trace_id, span_id) for log-trace correlation.
+
+### Environment Variables
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - Collector endpoint (e.g., `http://localhost:4317`)
+- `OTEL_EXPORTER_OTLP_HEADERS` - Optional headers for authentication
 
 ## Configuration
 
