@@ -1,0 +1,103 @@
+# Copilot Instructions for Podinfo
+
+## Project Overview
+
+Podinfo is a Go 1.25 microservice demo used by CNCF projects (Flux, Flagger) for Kubernetes testing. It runs dual HTTP/gRPC servers with Prometheus metrics, OpenTelemetry tracing, and structured zap logging.
+
+## Essential Commands
+
+```bash
+make run                    # Run locally (debug logging, gRPC on 9999)
+make test                   # Run tests with coverage (includes fmt, vet, tidy)
+make build                  # Build podinfo + podcli binaries
+make swagger                # Regenerate Swagger docs (requires swag tool)
+EXTRA_RUN_ARGS="--otel-service-name=podinfo" make run  # Enable tracing
+```
+
+## Architecture Quick Reference
+
+**Entry Points**: `cmd/podinfo/main.go` (server), `cmd/podcli/main.go` (CLI client)
+
+**Config Precedence**: CLI flags → Environment vars (`PODINFO_*`) → Config file  
+⚠️ Flags use dashes (`--backend-url`), env vars use underscores (`PODINFO_BACKEND_URL`)
+
+**Server Structure**:
+- HTTP handlers: [pkg/api/http/](pkg/api/http/) - each feature in own file (echo.go, token.go)
+- gRPC services: [pkg/api/grpc/](pkg/api/grpc/) - each service has subdirectory with `.proto` files
+- Routes registered in [server.go:registerHandlers()](pkg/api/http/server.go)
+
+## Code Patterns
+
+### HTTP Handler Pattern
+```go
+func (s *Server) myHandler(w http.ResponseWriter, r *http.Request) {
+    ctx, span := s.tracer.Start(r.Context(), "myHandler")
+    defer span.End()
+    // ...logic...
+    s.JSONResponse(w, r, result)         // 200 OK
+    s.JSONResponseCode(w, r, result, code) // Custom status
+    s.ErrorResponse(w, r, span, msg, code) // Error with tracing
+}
+```
+
+### HTTP Test Pattern (table-driven with mock server)
+```go
+func TestMyHandler(t *testing.T) {
+    srv := NewMockServer()  // from pkg/api/http/mock.go
+    handler := http.HandlerFunc(srv.myHandler)
+    req, _ := http.NewRequest("GET", "/endpoint", nil)
+    rr := httptest.NewRecorder()
+    handler.ServeHTTP(rr, req)
+    // assertions...
+}
+```
+
+### gRPC Service Structure
+Each service lives in `pkg/api/grpc/<service>/`:
+- `<service>.proto` - Define service/messages
+- `<service>.pb.go`, `<service>_grpc.pb.go` - Generated (run protoc)
+- Implementation in parent dir: `pkg/api/grpc/<service>.go`
+
+Regenerate after proto changes:
+```bash
+protoc --go_out=. --go_opt=paths=source_relative \
+  --go-grpc_out=. --go-grpc_opt=paths=source_relative \
+  pkg/api/grpc/<service>/<service>.proto
+```
+
+### Swagger Annotations
+Add above handlers for auto-generated docs:
+```go
+// MyEndpoint godoc
+// @Summary Short description
+// @Tags HTTP API
+// @Router /endpoint [get]
+// @Success 200 {object} ResponseType
+```
+
+## Key Gotchas
+
+- **Tracing is opt-in**: Only enabled when `--otel-service-name` is set (no-op tracer otherwise)
+- **Version injection**: `REVISION` set via build ldflags from git commit
+- **Redis optional**: Only connects if `--cache-server` provided
+- **Shutdown delay**: 3-second wait in non-debug mode for Kubernetes endpoint updates
+- **Static binary**: Built with `CGO_ENABLED=0`
+
+## Deployment Methods
+
+- **Helm**: `charts/podinfo/` - lint with `make build-charts`
+- **Kustomize**: `kustomize/` and `deploy/overlays/`
+- **Timoni**: `timoni/podinfo/` - validate with `make timoni-build`
+
+Version sync across all manifests: `make version-set TAG=x.y.z`
+
+## Key Files
+
+| Purpose | Location |
+|---------|----------|
+| HTTP server setup | [pkg/api/http/server.go](pkg/api/http/server.go) |
+| Middleware stack | [pkg/api/http/server.go:registerMiddlewares](pkg/api/http/server.go) |
+| Mock for HTTP tests | [pkg/api/http/mock.go](pkg/api/http/mock.go) |
+| gRPC server setup | [pkg/api/grpc/server.go](pkg/api/grpc/server.go) |
+| Version management | [pkg/version/version.go](pkg/version/version.go) |
+| Graceful shutdown | [pkg/signals/](pkg/signals/) |
